@@ -18,7 +18,9 @@
 //! count (low byte in `zone[0]`, mid in `zone[1]`, high in `zone[2]`),
 //! which the kernel reads back as `i_blocks`.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+
+use anyhow::Context;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -270,9 +272,22 @@ impl Xiafs {
     fn write_file_data(&mut self, ino: u32, path: &Path) -> anyhow::Result<()> {
         let mut data = Vec::new();
         // Bound the read even if the source grows after it is opened.
-        File::open(path)?
-            .take(MAX_FILE_SIZE as u64 + 1)
-            .read_to_end(&mut data)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Refuse symlink replacements and avoid blocking if a file was
+            // replaced with a FIFO after directory enumeration.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options
+            .open(path)
+            .with_context(|| format!("opening source file: {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("source is not a regular file: {}", path.display());
+        }
+        file.take(MAX_FILE_SIZE as u64 + 1).read_to_end(&mut data)?;
         if data.len() > MAX_FILE_SIZE {
             anyhow::bail!(
                 "file too large (max {MAX_FILE_SIZE} bytes): {}",
@@ -710,6 +725,31 @@ mod tests {
         file.set_len(MAX_FILE_SIZE as u64).unwrap();
         xiafs.write_file_data(ino, &path).unwrap();
         assert_eq!(xiafs.inodes[(ino - 1) as usize].size, MAX_FILE_SIZE as u32);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_open_rejects_symlink_and_fifo_replacements() {
+        use std::ffi::CString;
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let src = TempDir::new().unwrap();
+        let file = src.path().join("file");
+        fs::write(&file, b"payload").unwrap();
+        let link = src.path().join("link");
+        symlink(&file, &link).unwrap();
+        let fifo = src.path().join("fifo");
+        let c_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path for the duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let mut xiafs = Xiafs::new(2).unwrap();
+        let ino = xiafs.alloc_inode().unwrap();
+        assert!(xiafs.write_file_data(ino, &link).is_err());
+        let err = xiafs.write_file_data(ino, &fifo).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"));
+        fs::remove_file(&link).unwrap();
+        fs::remove_file(&file).unwrap();
+        let err = xiafs.populate_root(src.path()).unwrap_err().to_string();
+        assert!(err.contains("unsupported source entry") && err.contains("fifo"));
     }
 
     #[test]
