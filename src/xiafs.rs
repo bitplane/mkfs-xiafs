@@ -24,6 +24,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BLOCK_SIZE: usize = 1024;
+const SECTORS_PER_ZONE: u32 = (BLOCK_SIZE / 512) as u32;
 pub const MAGIC: u32 = 0x012F_D16D;
 const ROOT_INO: u32 = 1;
 const BAD_INO: u32 = 2;
@@ -96,7 +97,7 @@ fn set_inode_zone(inode: &mut Inode, file_zone: usize, disk_zone: u32) -> anyhow
 }
 
 fn set_inode_blocks(inode: &mut Inode, blocks: u32) {
-    // Pack blocks (24 bits) across the high bytes of zone[0..=2].
+    // Pack the count of allocated 512-byte sectors (24 bits) across the high bytes of zone[0..=2].
     inode.zone[0] = (inode.zone[0] & 0x00FF_FFFF) | ((blocks << 24) & 0xFF00_0000);
     inode.zone[1] = (inode.zone[1] & 0x00FF_FFFF) | ((blocks << 16) & 0xFF00_0000);
     inode.zone[2] = (inode.zone[2] & 0x00FF_FFFF) | ((blocks << 8) & 0xFF00_0000);
@@ -187,7 +188,7 @@ impl Xiafs {
             root.atime = now;
             root.mtime = now;
             set_inode_zone(root, 0, root_block)?;
-            set_inode_blocks(root, 1);
+            set_inode_blocks(root, SECTORS_PER_ZONE);
         }
         xiafs.init_dir_block(root_block, ROOT_INO, ROOT_INO);
 
@@ -247,7 +248,7 @@ impl Xiafs {
                     child.nlinks = 2;
                     child.size = BLOCK_SIZE as u32;
                     set_inode_zone(child, 0, block)?;
-                    set_inode_blocks(child, 1);
+                    set_inode_blocks(child, SECTORS_PER_ZONE);
                 }
                 self.init_dir_block(block, child_ino, dir_ino);
                 self.add_dir_entry(dir_ino, name, child_ino)?;
@@ -293,6 +294,7 @@ impl Xiafs {
 
         if have_indirect {
             let ind_zone = self.alloc_zone()?;
+            blocks += 1;
             self.inodes[(ino - 1) as usize].zone[8] = ind_zone;
             let off = (ind_zone as usize) * BLOCK_SIZE;
             for (i, z) in indirect.iter().enumerate() {
@@ -301,7 +303,10 @@ impl Xiafs {
             }
         }
 
-        set_inode_blocks(&mut self.inodes[(ino - 1) as usize], blocks);
+        set_inode_blocks(
+            &mut self.inodes[(ino - 1) as usize],
+            blocks * SECTORS_PER_ZONE,
+        );
         Ok(())
     }
 
@@ -354,6 +359,11 @@ impl Xiafs {
             new_block,
         )?;
         self.inodes[(dir_ino - 1) as usize].size = ((block_idx + 1) * BLOCK_SIZE) as u32;
+
+        set_inode_blocks(
+            &mut self.inodes[(dir_ino - 1) as usize],
+            (block_idx as u32 + 1) * SECTORS_PER_ZONE,
+        );
 
         let off = (new_block as usize) * BLOCK_SIZE;
         // (image is zero-init, so no explicit clear needed)
@@ -614,6 +624,46 @@ mod tests {
             let free: usize = map.iter().map(|byte| byte.count_zeros() as usize).sum();
             assert_eq!(free, data_zones - extra - 1);
         }
+    }
+
+    fn disk_inode_blocks(xiafs: &mut Xiafs, ino: u32) -> u32 {
+        xiafs.write_inode_table();
+        let off =
+            (1 + xiafs.imap_zones + xiafs.zmap_zones) as usize * 1024 + (ino as usize - 1) * 64;
+        (0..3)
+            .map(|i| (read_u32_le(&xiafs.image, off + 24 + i * 4) >> 24) << (8 * i))
+            .sum()
+    }
+
+    #[test]
+    fn file_sector_counts_include_indirect_blocks() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("file");
+        for (len, sectors) in [(0, 0), (1, 2), (8192, 16), (8193, 20), (270336, 530)] {
+            fs::write(&path, vec![42; len]).unwrap();
+            let mut xiafs = Xiafs::new(2).unwrap();
+            let ino = xiafs.alloc_inode().unwrap();
+            xiafs.write_file_data(ino, &path).unwrap();
+            assert_eq!(disk_inode_blocks(&mut xiafs, ino), sectors, "size {len}");
+        }
+    }
+
+    #[test]
+    fn directory_sector_counts_track_growth() {
+        let mut xiafs = Xiafs::new(2).unwrap();
+        assert_eq!(disk_inode_blocks(&mut xiafs, 1), 2);
+        for i in 0..20 {
+            xiafs
+                .add_dir_entry(1, &format!("{i:03}{}", "x".repeat(245)), 3)
+                .unwrap();
+            let size = xiafs.inodes[0].size;
+            assert_eq!(disk_inode_blocks(&mut xiafs, 1), size / 512);
+        }
+        let src = TempDir::new().unwrap();
+        fs::create_dir(src.path().join("sub")).unwrap();
+        let mut xiafs = Xiafs::new(2).unwrap();
+        xiafs.populate_root(src.path()).unwrap();
+        assert_eq!(disk_inode_blocks(&mut xiafs, 3), 2);
     }
 
     #[test]
