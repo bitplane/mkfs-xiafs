@@ -17,7 +17,7 @@ struct Cli {
     /// Output filename
     filename: PathBuf,
 
-    /// Image size in megabytes
+    /// Image size in MiB (1–4095)
     size_mb: u32,
 }
 

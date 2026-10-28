@@ -41,7 +41,8 @@ sudo mount -o loop,ro -t xiafs out.xiafs /mnt
   are rejected with an error.
 - Filenames up to 248 bytes.
 - 8 direct + 1 single-indirect zone slots → max file ≈ 264 KB.
-- 16 GB volume size cap (24-bit zone numbers).
+- Image sizes are 1–4095 MiB (the writer currently limits images to below 4 GiB).
+  The complete image is held in memory during creation.
 - Directories are direct-only (no indirect for directory blocks).
 
 ## License

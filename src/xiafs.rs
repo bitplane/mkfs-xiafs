@@ -128,7 +128,7 @@ impl Xiafs {
         }
         let image_size = u64::from(size_mb) * 1024 * 1024;
         if image_size > u64::from(u32::MAX) {
-            anyhow::bail!("image size exceeds 4 GB");
+            anyhow::bail!("image size must be at most 4095 MiB");
         }
         let nzones = (image_size / BLOCK_SIZE as u64) as u32;
         if nzones < 32 {
