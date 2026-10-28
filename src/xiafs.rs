@@ -223,7 +223,10 @@ impl Xiafs {
                 anyhow::bail!("name too long (max {NAME_LEN}): {name}");
             }
             if !meta.is_file() && !meta.is_dir() {
-                continue;
+                anyhow::bail!(
+                    "unsupported source entry (only regular files and directories are supported): {}",
+                    path.display()
+                );
             }
 
             let child_ino = self.alloc_inode()?;
@@ -664,6 +667,22 @@ mod tests {
         let mut xiafs = Xiafs::new(2).unwrap();
         xiafs.populate_root(src.path()).unwrap();
         assert_eq!(disk_inode_blocks(&mut xiafs, 3), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_source_entries_fail_with_their_path() {
+        use std::os::unix::fs::symlink;
+        for target in ["missing-target", "directory"] {
+            let src = TempDir::new().unwrap();
+            fs::create_dir(src.path().join("directory")).unwrap();
+            let path = src.path().join("link");
+            symlink(target, &path).unwrap();
+            let mut xiafs = Xiafs::new(2).unwrap();
+            let err = xiafs.populate_root(src.path()).unwrap_err().to_string();
+            assert!(err.contains("unsupported source entry"));
+            assert!(err.contains(&path.display().to_string()));
+        }
     }
 
     #[test]

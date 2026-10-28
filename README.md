@@ -37,6 +37,8 @@ sudo mount -o loop,ro -t xiafs out.xiafs /mnt
 
 ## Limits
 
+- Population supports regular files and directories; symlinks and special files
+  are rejected with an error.
 - Filenames up to 248 bytes.
 - 8 direct + 1 single-indirect zone slots → max file ≈ 264 KB.
 - 16 GB volume size cap (24-bit zone numbers).
