@@ -13,7 +13,7 @@ from Minix and competing with ext2. Modern kernels can mount it via
 From crates.io:
 
 ```bash
-cargo install mkfs-xiafs
+cargo install --locked mkfs-xiafs
 ```
 
 This installs a binary called `mkfs-xiafs`. Pre-built binaries for Linux
@@ -25,7 +25,7 @@ each [GitHub release][releases].
 ## Usage
 
 ```bash
-# Create an empty 4 MB image.
+# Create an empty 4 MiB image.
 mkfs-xiafs out.xiafs 4
 
 # Populate from a directory tree (recursive — subdirectories are preserved).
@@ -39,7 +39,8 @@ sudo mount -o loop,ro -t xiafs out.xiafs /mnt
 
 - Population supports regular files and directories; symlinks and special files
   are rejected with an error.
-- Filenames up to 248 bytes.
+- Filenames must be UTF-8 and at most 248 bytes.
+- Hard links are imported as separate file copies.
 - 8 direct + 1 single-indirect zone slots → max file ≈ 264 KB.
 - Image sizes are 1–4095 MiB (the writer currently limits images to below 4 GiB).
   The complete image is held in memory during creation.

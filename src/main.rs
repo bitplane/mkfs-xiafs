@@ -30,7 +30,7 @@ fn run() -> anyhow::Result<()> {
     let stats = xiafs.write_to(&cli.filename)?;
 
     println!(
-        "Created xiafs image: {} ({}MB, {} inodes, {} zones, magic=0x{:X})",
+        "Created xiafs image: {} ({}MiB, {} inodes, {} zones, magic=0x{:X})",
         cli.filename.display(),
         cli.size_mb,
         stats.ninodes,

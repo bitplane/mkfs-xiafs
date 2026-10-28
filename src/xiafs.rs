@@ -14,7 +14,7 @@
 //! at 4 bytes each). Maximum file size is therefore (8 + 256) × 1024 ≈
 //! 264 KB.
 //!
-//! The high byte of `i_zone[0..=2]` carries a 24-bit "blocks allocated"
+//! The high byte of `i_zone[0..=2]` carries a 24-bit allocated 512-byte sector
 //! count (low byte in `zone[0]`, mid in `zone[1]`, high in `zone[2]`),
 //! which the kernel reads back as `i_blocks`.
 
@@ -136,9 +136,7 @@ impl Xiafs {
         if nzones < 32 {
             anyhow::bail!("filesystem too small");
         }
-        if nzones >= (1u32 << 24) {
-            anyhow::bail!("filesystem exceeds 16 GB zone-number limit");
-        }
+        debug_assert!(nzones < (1u32 << 24));
 
         // Layout (matching the original mkxfs heuristic).
         let inode_zones = (nzones >> 2) / INODES_PER_BLOCK + 1;
@@ -233,10 +231,7 @@ impl Xiafs {
             }
 
             let child_ino = self.alloc_inode()?;
-            // The C version writes st.st_mode (full mode incl. type bits)
-            // into i_mode unconditionally first, then overwrites only for
-            // dirs/files via the kernel-style S_IF* path. Reproduce that
-            // by copying the mode here, then we always overwrite below.
+            // Copy the source mode, including its file type bits.
             {
                 let child = &mut self.inodes[(child_ino - 1) as usize];
                 child.mode = mode_from_meta(&meta) as u16;
@@ -310,9 +305,7 @@ impl Xiafs {
                 set_inode_zone(&mut self.inodes[(ino - 1) as usize], file_zone, disk_zone)?;
             } else {
                 let idx = file_zone - DIRECT_ZONES;
-                if idx >= ADDRS_PER_ZONE as usize {
-                    anyhow::bail!("file too large (needs double indirect)");
-                }
+                debug_assert!(idx < ADDRS_PER_ZONE as usize);
                 indirect[idx] = disk_zone;
                 have_indirect = true;
             }
@@ -513,7 +506,7 @@ impl Xiafs {
                 self.image[off + bit / 8] &= !(1 << (bit % 8));
             }
         }
-        debug_assert!(self.zone_used.len().div_ceil(8) <= bytes);
+        debug_assert!(((self.nzones - self.first_data_zone + 1) as usize).div_ceil(8) <= bytes);
     }
 
     fn write_inode_table(&mut self) {
