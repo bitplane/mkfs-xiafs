@@ -468,9 +468,12 @@ impl Xiafs {
         let off = (1 + self.imap_zones as usize) * BLOCK_SIZE;
         let bytes = (self.zmap_zones as usize) * BLOCK_SIZE;
         self.image[off..off + bytes].fill(0xff);
-        for (z, &used) in self.zone_used.iter().enumerate() {
+        for z in self.first_data_zone as usize..self.nzones as usize {
+            let used = self.zone_used[z];
+            // Bit zero is reserved; bit one represents the first data zone.
+            let bit = z - self.first_data_zone as usize + 1;
             if !used {
-                self.image[off + z / 8] &= !(1 << (z % 8));
+                self.image[off + bit / 8] &= !(1 << (bit % 8));
             }
         }
         debug_assert!(self.zone_used.len().div_ceil(8) <= bytes);
@@ -583,9 +586,33 @@ mod tests {
             }
             assert!(!bitmap_bit(&xiafs.image, 1024, xiafs.ninodes as usize));
             let zoff = (1 + xiafs.imap_zones as usize) * 1024;
-            for bit in xiafs.nzones as usize..xiafs.zmap_zones as usize * 8192 {
+            for bit in (xiafs.nzones - xiafs.first_data_zone) as usize + 1
+                ..xiafs.zmap_zones as usize * 8192
+            {
                 assert!(bitmap_bit(&xiafs.image, zoff, bit));
             }
+        }
+    }
+
+    #[test]
+    fn zone_map_matches_data_allocations_and_free_space() {
+        for size in [2, 33] {
+            let mut xiafs = Xiafs::new(size).unwrap();
+            // Allocate through a bitmap-zone boundary for the larger image.
+            let extra = if size == 2 { 5 } else { 8200 };
+            for _ in 0..extra {
+                xiafs.alloc_zone().unwrap();
+            }
+            xiafs.write_zone_bitmap();
+            let start = (1 + xiafs.imap_zones as usize) * 1024;
+            let map = &xiafs.image[start..start + xiafs.zmap_zones as usize * 1024];
+            assert!(bitmap_bit(map, 0, 0));
+            let data_zones = (xiafs.nzones - xiafs.first_data_zone) as usize;
+            for bit in 1..=data_zones {
+                assert_eq!(bitmap_bit(map, 0, bit), bit <= extra + 1);
+            }
+            let free: usize = map.iter().map(|byte| byte.count_zeros() as usize).sum();
+            assert_eq!(free, data_zones - extra - 1);
         }
     }
 
