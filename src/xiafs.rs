@@ -79,7 +79,7 @@ impl Inode {
 
 fn dir_rec_len(name_len: u8) -> u16 {
     let n = u16::from(name_len);
-    (7 + n).div_ceil(4) * 4
+    (8 + n).div_ceil(4) * 4
 }
 
 fn set_inode_zone(inode: &mut Inode, file_zone: usize, disk_zone: u32) -> anyhow::Result<()> {
@@ -335,6 +335,7 @@ impl Xiafs {
                     self.image[new_off + 6] = name_len;
                     self.image[new_off + 7..new_off + 7 + name_bytes.len()]
                         .copy_from_slice(name_bytes);
+                    self.image[new_off + 7 + name_bytes.len()] = 0;
                     return Ok(());
                 }
                 off += d_rec_len as usize;
@@ -360,6 +361,7 @@ impl Xiafs {
         self.image[off + 4..off + 6].copy_from_slice(&(BLOCK_SIZE as u16).to_le_bytes());
         self.image[off + 6] = name_len;
         self.image[off + 7..off + 7 + name_bytes.len()].copy_from_slice(name_bytes);
+        self.image[off + 7 + name_bytes.len()] = 0;
         Ok(())
     }
 
@@ -372,6 +374,7 @@ impl Xiafs {
         self.image[off + 4..off + 6].copy_from_slice(&dot_len.to_le_bytes());
         self.image[off + 6] = 1;
         self.image[off + 7] = b'.';
+        self.image[off + 8] = 0;
 
         // dotdot entry, fills the remainder of the block
         let dotdot_off = off + dot_len as usize;
@@ -381,6 +384,7 @@ impl Xiafs {
         self.image[dotdot_off + 6] = 2;
         self.image[dotdot_off + 7] = b'.';
         self.image[dotdot_off + 8] = b'.';
+        self.image[dotdot_off + 9] = 0;
     }
 
     fn alloc_zone(&mut self) -> anyhow::Result<u32> {
@@ -521,6 +525,46 @@ mod tests {
         u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
     }
 
+    // Validate the on-disk records using the reader's constraints, independently
+    // of the writer's record-length calculation.
+    fn directory_names(image: &[u8], inode: &Inode) -> Vec<Vec<u8>> {
+        let mut names = Vec::new();
+        for zone in &inode.zone[..inode.size as usize / BLOCK_SIZE] {
+            let start = (zone & 0x00ff_ffff) as usize * BLOCK_SIZE;
+            let block = &image[start..start + BLOCK_SIZE];
+            let mut pos = 0;
+            while pos < BLOCK_SIZE {
+                let rec = u16::from_le_bytes(block[pos + 4..pos + 6].try_into().unwrap()) as usize;
+                let len = block[pos + 6] as usize;
+                assert!(rec >= 12 && rec % 4 == 0 && pos + rec <= BLOCK_SIZE);
+                assert!((1..=248).contains(&len) && len + 8 <= rec);
+                assert_eq!(block[pos + 7 + len], 0);
+                names.push(block[pos + 7..pos + 7 + len].to_vec());
+                pos += rec;
+            }
+            assert_eq!(pos, BLOCK_SIZE);
+        }
+        names
+    }
+
+    #[test]
+    fn directory_records_preserve_all_name_lengths_across_blocks() {
+        let mut xiafs = Xiafs::new(2).unwrap();
+        let mut expected = vec![b".".to_vec(), b"..".to_vec()];
+        // All alignment cases, maximum names, and enough entries to grow.
+        for i in 0..20 {
+            let name = format!("{i:02}{}", "x".repeat([1, 2, 3, 4, 243, 246][i % 6]));
+            xiafs.add_dir_entry(ROOT_INO, &name, 3).unwrap();
+            expected.push(name.into_bytes());
+        }
+        let root = xiafs.inodes[0];
+        assert!(root.size > 1024);
+        let mut actual = directory_names(&xiafs.image, &root);
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn empty_image_has_correct_superblock() {
         let dir = TempDir::new().unwrap();
@@ -554,7 +598,10 @@ mod tests {
         // dot entry
         assert_eq!(read_u32_le(&bytes, dir_off), ROOT_INO);
         assert_eq!(bytes[dir_off + 6], 1);
-        assert_eq!(bytes[dir_off + 7], b'.');
+        assert_eq!(&bytes[dir_off + 4..dir_off + 6], &12u16.to_le_bytes());
+        assert_eq!(&bytes[dir_off + 7..dir_off + 9], b".\0");
+        assert_eq!(read_u32_le(&bytes, dir_off + 12), ROOT_INO);
+        assert_eq!(&bytes[dir_off + 19..dir_off + 22], b"..\0");
     }
 
     #[test]
