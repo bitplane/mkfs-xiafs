@@ -34,6 +34,7 @@ const DIRECT_ZONES: usize = 8;
 const INODES_PER_BLOCK: u32 = (BLOCK_SIZE / 64) as u32; // 16
 const ADDRS_PER_ZONE: u32 = (BLOCK_SIZE / 4) as u32; // 256
 const INODE_SIZE: usize = 64;
+const MAX_FILE_SIZE: usize = (DIRECT_ZONES + ADDRS_PER_ZONE as usize) * BLOCK_SIZE;
 
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
@@ -268,9 +269,17 @@ impl Xiafs {
 
     fn write_file_data(&mut self, ino: u32, path: &Path) -> anyhow::Result<()> {
         let mut data = Vec::new();
-        File::open(path)?.read_to_end(&mut data)?;
-        let size = u32::try_from(data.len())
-            .map_err(|_| anyhow::anyhow!("file exceeds 4 GB: {}", path.display()))?;
+        // Bound the read even if the source grows after it is opened.
+        File::open(path)?
+            .take(MAX_FILE_SIZE as u64 + 1)
+            .read_to_end(&mut data)?;
+        if data.len() > MAX_FILE_SIZE {
+            anyhow::bail!(
+                "file too large (max {MAX_FILE_SIZE} bytes): {}",
+                path.display()
+            );
+        }
+        let size = data.len() as u32;
         self.inodes[(ino - 1) as usize].size = size;
 
         let mut indirect = [0u32; ADDRS_PER_ZONE as usize];
@@ -683,6 +692,24 @@ mod tests {
             assert!(err.contains("unsupported source entry"));
             assert!(err.contains(&path.display().to_string()));
         }
+    }
+
+    #[test]
+    fn file_size_limit_is_checked_before_zone_allocation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("file");
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_FILE_SIZE as u64 + 1).unwrap();
+        let mut xiafs = Xiafs::new(2).unwrap();
+        let ino = xiafs.alloc_inode().unwrap();
+        let next_zone = xiafs.next_zone;
+        let err = xiafs.write_file_data(ino, &path).unwrap_err().to_string();
+        assert!(err.contains("file too large"));
+        assert!(err.contains(&path.display().to_string()));
+        assert_eq!(xiafs.next_zone, next_zone);
+        file.set_len(MAX_FILE_SIZE as u64).unwrap();
+        xiafs.write_file_data(ino, &path).unwrap();
+        assert_eq!(xiafs.inodes[(ino - 1) as usize].size, MAX_FILE_SIZE as u32);
     }
 
     #[test]
