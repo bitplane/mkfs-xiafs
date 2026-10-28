@@ -746,6 +746,31 @@ mod tests {
     }
 
     #[test]
+    fn image_size_boundaries() {
+        assert!(Xiafs::new(0).is_err());
+        assert!(Xiafs::new(4096).is_err());
+        assert!(Xiafs::new(u32::MAX).is_err());
+        let image = Xiafs::new(1).unwrap();
+        assert_eq!(image.image.len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn directory_limit_rejects_a_ninth_zone() {
+        let mut xiafs = Xiafs::new(2).unwrap();
+        // Three 256-byte records fit alongside dot/dotdot in the first zone;
+        // each of the remaining seven direct zones holds four records.
+        for i in 0..31 {
+            xiafs
+                .add_dir_entry(1, &format!("{i:03}{}", "x".repeat(245)), 3)
+                .unwrap();
+        }
+        assert_eq!(xiafs.inodes[0].size, 8192);
+        let err = xiafs.add_dir_entry(1, &"z".repeat(248), 3).unwrap_err();
+        assert!(err.to_string().contains("directory too large"));
+        assert_eq!(directory_names(&xiafs.image, &xiafs.inodes[0]).len(), 33);
+    }
+
+    #[test]
     fn empty_image_has_correct_superblock() {
         let dir = TempDir::new().unwrap();
         let img = dir.path().join("test.xiafs");
