@@ -453,26 +453,27 @@ impl Xiafs {
     fn write_inode_bitmap(&mut self) {
         let off = BLOCK_SIZE;
         let bytes = (self.imap_zones as usize) * BLOCK_SIZE;
-        // ninodes + 1 entries (bit 0 unused), but we trust inode_used.len() == ninodes + 1
-        for (i, &used) in self.inode_used.iter().enumerate() {
-            if used {
-                self.image[off + i / 8] |= 1 << (i % 8);
+        // Reserve inode zero and all padding bits; only valid free inodes
+        // may be advertised to the kernel allocator.
+        self.image[off..off + bytes].fill(0xff);
+        for (i, &used) in self.inode_used.iter().enumerate().skip(1) {
+            if !used {
+                self.image[off + i / 8] &= !(1 << (i % 8));
             }
         }
-        // Trailing bits beyond inode_used.len() are already zero in the
-        // imap area thanks to the zero-init image.
-        debug_assert!((self.inode_used.len() / 8) <= bytes);
+        debug_assert!(self.inode_used.len().div_ceil(8) <= bytes);
     }
 
     fn write_zone_bitmap(&mut self) {
         let off = (1 + self.imap_zones as usize) * BLOCK_SIZE;
         let bytes = (self.zmap_zones as usize) * BLOCK_SIZE;
+        self.image[off..off + bytes].fill(0xff);
         for (z, &used) in self.zone_used.iter().enumerate() {
-            if used {
-                self.image[off + z / 8] |= 1 << (z % 8);
+            if !used {
+                self.image[off + z / 8] &= !(1 << (z % 8));
             }
         }
-        debug_assert!((self.zone_used.len() / 8) <= bytes);
+        debug_assert!(self.zone_used.len().div_ceil(8) <= bytes);
     }
 
     fn write_inode_table(&mut self) {
@@ -563,6 +564,29 @@ mod tests {
         actual.sort();
         expected.sort();
         assert_eq!(actual, expected);
+    }
+
+    fn bitmap_bit(image: &[u8], offset: usize, bit: usize) -> bool {
+        image[offset + bit / 8] & (1 << (bit % 8)) != 0
+    }
+
+    #[test]
+    fn bitmap_padding_and_inode_zero_are_reserved() {
+        // Exercise both one-zone and multi-zone maps.
+        for size in [2, 33] {
+            let mut xiafs = Xiafs::new(size).unwrap();
+            xiafs.write_inode_bitmap();
+            xiafs.write_zone_bitmap();
+            assert!(bitmap_bit(&xiafs.image, 1024, 0));
+            for bit in xiafs.ninodes as usize + 1..xiafs.imap_zones as usize * 8192 {
+                assert!(bitmap_bit(&xiafs.image, 1024, bit));
+            }
+            assert!(!bitmap_bit(&xiafs.image, 1024, xiafs.ninodes as usize));
+            let zoff = (1 + xiafs.imap_zones as usize) * 1024;
+            for bit in xiafs.nzones as usize..xiafs.zmap_zones as usize * 8192 {
+                assert!(bitmap_bit(&xiafs.image, zoff, bit));
+            }
+        }
     }
 
     #[test]
