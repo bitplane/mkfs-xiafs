@@ -58,7 +58,10 @@ jobs:
   # 2. Re-run the test suite as a release gate.
   # ----------------------------------------------------------------------
   test:
-    name: Test gate
+    name: Test gate (${{ matrix.rust }})
+    strategy:
+      matrix:
+        rust: [stable, "1.85.0"]
     needs: verify-tag
     runs-on: ubuntu-latest
     permissions:
@@ -66,8 +69,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets
+      - run: cargo test --all-targets --locked
 
   # ----------------------------------------------------------------------
   # 3. Build release binaries for the supported targets.
@@ -176,7 +181,7 @@ jobs:
   # ----------------------------------------------------------------------
   publish-crates:
     name: Publish to crates.io
-    needs: [verify-tag, test]
+    needs: [verify-tag, build]
     runs-on: ubuntu-latest
     environment: release
     permissions:
